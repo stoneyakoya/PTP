@@ -683,11 +683,18 @@ def main():
         input_dim = 1280
     timestamp = time.strftime("%Y_%m%d_%H%M%S")
     dataset_dir = "data/dataset/normal"
-
     # save dir
     model_save_dir = "data/models"
+    if not os.path.exists(model_save_dir):
+        os.makedirs(model_save_dir)
     result_df_save_dir = "data/results"
+    if not os.path.exists(result_df_save_dir):
+        os.makedirs(model_save_dir)
+
     plt_save_dir = "data/plts"
+    if not os.path.exists(plt_save_dir):
+        os.makedirs(plt_save_dir)
+
     params = {
         "model_type": model_type,
         "train_path": f"{dataset_dir}/train.csv",
