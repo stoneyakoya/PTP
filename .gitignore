@@ -2,7 +2,7 @@ venv
 .vscode
 
 #data
-data/raw/*
+data/raw/pSILAC_TMT.csv
 data/peptide_embeddings/*
 data/protein_embeddings/*
 data/uniprot/*
