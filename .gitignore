@@ -12,4 +12,5 @@ data/tmp
 data/params_scores/*
 data/models/*
 
+!data/row
 src/analyze
