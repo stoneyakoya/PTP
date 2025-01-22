@@ -1,0 +1,15 @@
+venv
+.vscode
+
+#data
+data/raw/*
+data/peptide_embeddings/*
+data/protein_embeddings/*
+data/uniprot/*
+data/dataset/*
+data/results/*
+data/tmp
+data/params_scores/*
+data/models/*
+
+src/analyze
