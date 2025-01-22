@@ -1,0 +1,2 @@
+Please save the pSILAC-TMT sheet from the original supplementary data file data1.xlsx as a CSV file and store it in the data/raw directory.
+It is recommended to name the file as pSILAC_TMT.csv.
