@@ -747,7 +747,6 @@ def main():
         model = Transformer_AASeq
 
     if "TimeSeq" in model_type:
-        # モデル実行
         scores = run_model(
             data_loader=data_loader,
             model=model,
