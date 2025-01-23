@@ -30,7 +30,17 @@
     pip install -r requirements.txt
     ```
 
-
+## Create Datasets
+1. Clone the repository
+   Please save the pSILAC-TMT sheet from the original supplementary data file supplymentary dataset 1（Jana Zecha et
+   al., Nature Communications, 13:165, 2022; PXD023218） as a CSV file and store it in the data/raw directory.
+   It is recommended to name the file as pSILAC_TMT.csv.
+2. Pre-process
+   ```bash
+   python scripts/preprocess_data.py
+   ```
+   
+## Train&Test
 
 ## Project Directory Structure
 
