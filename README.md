@@ -3,6 +3,7 @@
 ## Prerequisites
 - Python 3.11.4
 - Git
+- conda
 
 ## Setup Steps
 
@@ -14,19 +15,12 @@
 
 2. Create a virtual environment
     ```bash
-    python3 -m venv venv
+    conda create -p ./venv python==3.11.4
     ```
 
 3. Activate the virtual environment
-
-    For Unix/MacOS:
     ```bash
-    source venv/bin/activate
-    ```
-
-    For Windows:
-    ```bash
-    .\venv\Scripts\activate
+    conda activate ./venv
     ```
 4. Install PyTorch
     Visit [PyTorch official website](https://pytorch.org/get-started/locally/) and follow the installation command for your system.
@@ -44,12 +38,8 @@
 .
 ├── data/             # Datasets (raw and processed data)
 ├── models/           # Trained model files
-├── notebooks/        # Jupyter notebooks for experiments and analysis
 ├── README.md         # Project overview and setup instructions
 ├── requirements.txt  # Python dependencies
 ├── scripts/          # Task-specific scripts (e.g., data preprocessing)
 ├── src/              # Core source code (e.g., training, evaluation, prediction)
-├── tests/            # Unit and integration tests
-├── Untitled-1.py     # Temporary or auxiliary script (consider organizing or removing)
-└── venv/             # Python virtual environment (excluded from version control)
-# PTP
+└── venv/             # virtual environment (excluded from version control)
