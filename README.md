@@ -77,7 +77,6 @@ If you want to adjust parameters (e.g., learning rate, batch size, model archite
 - Modify them directly in the main() function inside src/train_test.py, or
 - Use command-line arguments
 
-
 ### Example Usage with Command-Line Arguments
 
 You can customize the training process by passing command-line arguments to `train_test.py`. For example:
@@ -90,7 +89,6 @@ In this example:
 * `--lr 0.001` sets the learning rate to 0.001.
 * `--num_epochs 10` sets the number of training epochs to 10.
 
-
 ### Adjustable Parameters
 
 The following parameters can be modified via command-line arguments. If not specified, the script uses the default values shown below:
@@ -101,7 +99,7 @@ The following parameters can be modified via command-line arguments. If not spec
 | `--train_path`           | Path to the training dataset CSV file.                                                                                         | `"data/train.csv"`      |
 | `--val_path`             | Path to the validation dataset CSV file.                                                                                       | `"data/validation.csv"` |
 | `--test_path`            | Path to the testing dataset CSV file.                                                                                          | `"data/test.csv"`       |
-| `--input_cls`            | Whether to use a classification input format (True/False).                                                                     | `False`                 |
+| `--input_cls`            | Whether to use a protein cls embedding input format (True/False).                                                             | `False`                 |
 | `--datasize`             | Number of data points to use during training. Use `"all"` to include the entire dataset, or specify an integer for a subset. | "all"                     |
 | `--batch_size`           | Number of samples per training batch.                                                                                          | `8`                     |
 | `--input_dim`            | Input feature dimension.                                                                                                       | `512`                   |
