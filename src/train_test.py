@@ -701,7 +701,7 @@ def main():
         "val_path": f"{dataset_dir}/validation.csv",
         "test_path": f"{dataset_dir}/test.csv",
         "input_cls": False,
-        "datasize": 10000,
+        "datasize": "all",
         "batch_size": 8,
         "input_dim": input_dim,
         "embed_dim": 512,
