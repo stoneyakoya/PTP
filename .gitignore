@@ -1,0 +1,14 @@
+venv
+.vscode
+
+#data
+data
+
+!data/raw
+src/analyze
+*.out
+
+src/analyze
+
+
+*__pycache__/
