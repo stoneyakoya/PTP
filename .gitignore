@@ -12,3 +12,7 @@ src/analyze
 
 
 *__pycache__/
+
+src/calcu_K.py
+src/predict_K.py
+src/train_test_unified.py
