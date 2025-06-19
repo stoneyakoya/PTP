@@ -1,0 +1,16 @@
+venv
+.vscode
+
+#data
+data
+
+!data/raw
+src/analyze
+*.out
+
+src/analyze
+
+
+*__pycache__/
+
+src/train_test.py
