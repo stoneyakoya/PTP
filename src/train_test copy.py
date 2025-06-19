@@ -36,6 +36,8 @@ def train_model(
     threshold=0.01,
     scheduler=None,
     model_type=1,
+    lag_devise=None,  # lag_devise: None or "lag_noise" for lag noise addition
+    weight_devise=None,  # "weight_noise" for weight
 ):
     model.train()
     early_stopping = EarlyStopping(patience=patience, threshold=threshold)
@@ -94,23 +96,27 @@ def train_model(
                 features_loss = batch["features_loss"].to(device)
                 features_incorporation = batch["features_incorporation"].to(device)
                 # Add noise to lag features
-                features_loss, features_incorporation = lag_noise(
-                    features_loss, features_incorporation, noise_level=0.02, lag_dim=7
-                )
+                if lag_devise:
+                    features_loss, features_incorporation = lag_noise(
+                        features_loss, features_incorporation, noise_level=0.02, lag_dim=7
+                    )
                 outputs = model(features_loss, features_incorporation)
                 target_loss = batch["target_loss"].to(device)
                 target_incorporation = batch["target_incorporation"].to(device)
 
                 # Early point weight
-                timestep_tensor = timestep.float().to(target_loss.device)
-                weights = torch.where(
-                    timestep_tensor <= 6,
-                    torch.tensor(2.0, device=timestep_tensor.device),
-                    torch.tensor(1.0, device=timestep_tensor.device),
-                )
-
-                loss_loss = (criterion(outputs[0], target_loss.unsqueeze(-1)) * weights).mean()
-                loss_incorporation = (criterion(outputs[1], target_incorporation.unsqueeze(-1)) * weights).mean()
+                if weight_devise:
+                    timestep_tensor = timestep.float().to(target_loss.device)
+                    weights = torch.where(
+                        timestep_tensor <= 6,
+                        torch.tensor(2.0, device=timestep_tensor.device),
+                        torch.tensor(1.0, device=timestep_tensor.device),
+                    )
+                    loss_loss = (criterion(outputs[0], target_loss.unsqueeze(-1)) * weights).mean()
+                    loss_incorporation = (criterion(outputs[1], target_incorporation.unsqueeze(-1)) * weights).mean()
+                else:
+                    loss_loss = criterion(outputs[0], target_loss.unsqueeze(-1)).mean()
+                    loss_incorporation = criterion(outputs[1], target_incorporation.unsqueeze(-1)).mean()
                 # calculation loss
                 total_loss = loss_loss + loss_incorporation
 
@@ -198,7 +204,7 @@ def get_allowed_clusters(epoch, ranked_clusters=[2, 0, 3, 1, 4]):
         return ranked_clusters
 
 
-def evaluate_model(model, loader, criterion, model_type):
+def evaluate_model(model, loader, criterion, model_type, weight_devise=None):
     model.eval()
     total_loss = 0.0
     with torch.no_grad():
@@ -208,14 +214,19 @@ def evaluate_model(model, loader, criterion, model_type):
                 outputs = model(features_x)
                 target_loss = batch["target_loss"].to(device)
                 target_incorp = batch["target_incorporation"].to(device)
-                timestep_tensor = torch.stack(batch["timestep"]).float().to(device)
-                weights = torch.where(
-                    timestep_tensor <= 6,
-                    torch.tensor(2.0, device=timestep_tensor.device),
-                    torch.tensor(1.0, device=timestep_tensor.device),
-                )
-                loss_loss = (criterion(outputs[0], target_loss.unsqueeze(-1)) * weights).mean()
-                loss_incorp = (criterion(outputs[1], target_incorp.unsqueeze(-1)) * weights).mean()
+                if weight_devise:
+                    # Early point weight
+                    timestep_tensor = torch.stack(batch["timestep"]).float().to(device)
+                    weights = torch.where(
+                        timestep_tensor <= 6,
+                        torch.tensor(2.0, device=timestep_tensor.device),
+                        torch.tensor(1.0, device=timestep_tensor.device),
+                    )
+                    loss_loss = (criterion(outputs[0], target_loss.unsqueeze(-1)) * weights).mean()
+                    loss_incorp = (criterion(outputs[1], target_incorp.unsqueeze(-1)) * weights).mean()
+                else:
+                    loss_loss = criterion(outputs[0], target_loss.unsqueeze(-1)).mean()
+                    loss_incorp = criterion(outputs[1], target_incorp.unsqueeze(-1)).mean()
 
                 total_loss += loss_loss + loss_incorp
             elif "AASeq":
@@ -224,17 +235,21 @@ def evaluate_model(model, loader, criterion, model_type):
                 outputs = model(features_loss, features_incorporation)
                 target_loss = batch["target_loss"].to(device)
                 target_incorp = batch["target_incorporation"].to(device)
-                # Early point weight
-                timestep = batch["timestep"]
-                timestep_tensor = timestep.float().to(target_loss.device)
-                weights = torch.where(
-                    timestep_tensor <= 6,
-                    torch.tensor(2.0, device=timestep_tensor.device),
-                    torch.tensor(1.0, device=timestep_tensor.device),
-                )
-                loss_loss = (criterion(outputs[0], target_loss.unsqueeze(-1)) * weights).mean()
-                loss_incorp = (criterion(outputs[1], target_incorp.unsqueeze(-1)) * weights).mean()
 
+                if weight_devise:
+                    # Early point weight
+                    timestep = batch["timestep"]
+                    timestep_tensor = timestep.float().to(target_loss.device)
+                    weights = torch.where(
+                        timestep_tensor <= 6,
+                        torch.tensor(2.0, device=timestep_tensor.device),
+                        torch.tensor(1.0, device=timestep_tensor.device),
+                    )
+                    loss_loss = (criterion(outputs[0], target_loss.unsqueeze(-1)) * weights).mean()
+                    loss_incorp = (criterion(outputs[1], target_incorp.unsqueeze(-1)) * weights).mean()
+                else:
+                    loss_loss = criterion(outputs[0], target_loss.unsqueeze(-1)).mean()
+                    loss_incorp = criterion(outputs[1], target_incorp.unsqueeze(-1)).mean()
                 total_loss += loss_loss + loss_incorp
 
     return total_loss / len(loader)
@@ -384,8 +399,8 @@ def test_model_AASeq(model, test_loader, results_save_dir):
 
     with torch.no_grad():
         for batch in test_loader:
-            # print(batch)
-            # print("batch_peptide", batch["peptide"])
+            print(batch)
+            print("batch_peptide", batch["peptide"])
             features_loss = batch["features_loss"].to(device)
             features_incorporation = batch["features_incorporation"].to(device)
             target_loss = batch["target_loss"].to(device)
@@ -412,6 +427,20 @@ def test_model_AASeq(model, test_loader, results_save_dir):
             timestep = batch["timestep"]
             peptides.extend(peptide)
             timesteps.extend(timestep.cpu().numpy().tolist())
+
+            # print("[DEBUG] output_incorporation:", output_incorporation)
+            # print("[DEBUG] output_loss:", output_loss)
+            # print("[DEBUG] output_turnover:", output_turnover)
+
+    # print("[DEBUG] Lengths of data arrays:")
+    # print(f"Peptides: {len(peptides)}")
+    # print(f"Targets_Loss: {len(targets_loss)}")
+    # print(f"Preds_Loss: {len(preds_loss)}")
+    # print(f"Targets_Incorporation: {len(targets_incorporation)}")
+    # print(f"Preds_Incorporation: {len(preds_incorporation)}")
+    # print(f"Targets_Turnover: {len(targets_turnover)}")
+    # print(f"Preds_Turnover: {len(preds_turnover)}")
+    # print(f"Timesteps: {len(timesteps)}")
 
     # 評価指標の計算
     rmse_loss = np.sqrt(mean_squared_error(targets_loss, preds_loss))
@@ -689,7 +718,7 @@ def run_model(
     val_dataset = data_loader(val_df, input_cls)
     test_dataset = data_loader(test_df, input_cls)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, drop_last=True)
 
@@ -785,7 +814,7 @@ def main():
 
         # デフォルトの共通パラメータ
         default_model_type = "AASeq_Transformer_based"
-        default_dataset_dir = f"data/dataset/sampling/fold_{i}"
+        default_dataset_dir = f"data/dataset/normal/fold_{i}"
 
         # argparseでの初期パース（model_typeのみ先に抽出）
         parser = argparse.ArgumentParser(description="Train peptide turnover prediction model")
@@ -796,6 +825,10 @@ def main():
         # モデルタイプに応じたinput_dimを決定
         if "AASeq_Transformer_based" in model_type:
             input_dim = 1287
+        elif "TimeSeq_LSTM_AAC" in model_type:
+            input_dim = 20  # AACの次元数
+        else:
+            input_dim = 5120
 
         # 各種保存ディレクトリ
         model_save_dir = "data/models"
@@ -821,18 +854,18 @@ def main():
             "embed_dim": 512,
             "n_heads": 4,
             "num_layers": 2,
-            "dropout": 0.2,
+            "dropout": 0.3,
             "activation_func": "ReLU",
             "lr": 0.001,
             "num_epochs": 50,
             "criterion": "MSE",
             "optimizer": "Adam",
-            "early_stop_patience": 6,
+            "early_stop_patience": 10,
             "early_stop_threshold": 0.001,
-            "scheduler_patience": 3,
-            "scheduler_threshold": 0.001,
+            "scheduler_patience": 6,
+            "scheduler_threshold": 0.0001,
             "model_save_path": f"{model_save_dir}/model_{timestamp}.pth",
-            "result_save_dir": f"{result_df_save_dir}/03_AASeq_Transformer_based_sampling/fold_{i}",
+            "result_save_dir": f"{result_df_save_dir}/AASeq_Transformer_based_normal/fold_{i}",
             "plt_save_dir": f"{plt_save_dir}/{timestamp}",
         }
 
@@ -881,7 +914,7 @@ def main():
 
         # 結果保存
         with open(
-            f"{result_df_save_dir}/03_AASeq_Transformer_based_sampling/fold_{i}/{timestamp}.json",
+            f"{result_df_save_dir}/03_AASeq_Transformer_based_normal/fold_{i}/{timestamp}.json",
             "w",
         ) as f:
             json.dump(output, f, indent=4)

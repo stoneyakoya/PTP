@@ -178,6 +178,7 @@ class Datasets_TimeSeq_AAC(Dataset):
             target_incorp_list.append(row_dict["Target_LabelIncorporation"])
             target_turnover_list.append(row_dict["Target_TurnoverRate"])
             peptides.append(row_dict["Cleaned_Peptidoform"])
+            proteins.append(row_dict["Protein_Sequence"])
             timesteps.append(row_dict["timestep"])
             loss_K.append(row_dict["loss_K"])
             incorp_K.append(row_dict["incorporation_K"])
@@ -190,6 +191,7 @@ class Datasets_TimeSeq_AAC(Dataset):
 
         return {
             "peptide": peptides,
+            "proteins": proteins,
             "timestep": timesteps,
             "features_x": torch.tensor(arr_loss, dtype=torch.float32),  # shape: (8, 20)
             "target_loss": torch.tensor(arr_t_loss, dtype=torch.float32),
@@ -236,6 +238,7 @@ class Datasets_AASeq(Dataset):
 
     def __init__(self, df, input_cls=False):
         self.peptides = df["Cleaned_Peptidoform"].values
+        self.proteins = df["Protein Sequence"].values
         self.embedding_paths = df["Peptido_Embedding_Path"].values
         self.timesteps = df["timestep"].values
 
@@ -257,6 +260,7 @@ class Datasets_AASeq(Dataset):
     def __getitem__(self, index, debug=False):
         # 基本情報取得
         peptide = self.peptides[index]
+        proteins = self.proteins[index]
         timestep = self.timesteps[index]
         cluster = torch.tensor(self.clusters[index], dtype=torch.float32)
 
@@ -290,6 +294,7 @@ class Datasets_AASeq(Dataset):
 
         return {
             "peptide": peptide,
+            "proteins": proteins,
             "features_loss": combined_features_loss_tensor,
             "features_incorporation": combined_features_incorporation_tensor,
             "timestep": timestep,
