@@ -313,7 +313,7 @@ def create_comparison_bubble_plot(
 
 
     # スタイル設定
-    plt.rcParams['font.size'] = 14
+    plt.rcParams['font.size'] = 20
     plt.rcParams['font.family'] = 'sans-serif'
     plt.rcParams['font.sans-serif'] = ['Arial', 'DejaVu Sans', 'Helvetica']
     
@@ -362,8 +362,8 @@ def create_comparison_bubble_plot(
         xtlabs = [f'{x_label_prefix} {cid}' for cid in cluster_ids]
     else:
         xtlabs = [str(cid) for cid in cluster_ids]   
-    ax.set_xticklabels([f'Cluster {cid}' for cid in cluster_ids], fontsize=20, weight='bold')
-    ax.set_xticklabels([f'{cid}' for cid in cluster_ids], fontsize=20, weight='bold')
+    ax.set_xticklabels([f'Cluster {cid}' for cid in cluster_ids], fontsize=28, weight='bold')
+    ax.set_xticklabels([f'{cid}' for cid in cluster_ids], fontsize=28, weight='bold')
 
     ax.set_xlim(-0.4, max(cluster_to_x.values()) + 0.4)
     
@@ -379,20 +379,20 @@ def create_comparison_bubble_plot(
         y_colors.append(category_colors.get(cat, category_colors['Other']))
     
     ax.set_yticks(range(len(term_scores)))
-    ax.set_yticklabels(y_labels, fontsize=18, ha='right')
+    ax.set_yticklabels(y_labels, fontsize=24, ha='right')
     ax.set_ylim(-0.5, len(term_scores) - 0.5)
     
     # y軸の余白を増やす
     ax.tick_params(axis='y', pad=5)
     
     # ラベル
-    ax.set_xlabel('', fontsize=20, weight='bold')
-    ax.set_ylabel('GO Terms / Pathways', fontsize=20, weight='bold', labelpad=15)
+    ax.set_xlabel('', fontsize=26, weight='bold')
+    ax.set_ylabel('GO Terms / Pathways', fontsize=26, weight='bold', labelpad=15)
     ax.set_title(title, 
-                fontsize=24, weight='bold', pad=30)
+                fontsize=30, weight='bold', pad=30)
     # ↓ ここを追加
     for label, color in zip(ax.get_yticklabels(), y_colors):
-        label.set_fontsize(22)
+        label.set_fontsize(28)
         label.set_weight('bold')
         label.set_color(color)
         # シャドウ効果
@@ -419,8 +419,8 @@ def create_comparison_bubble_plot(
         aspect=20,
         shrink=0.7
     )
-    cbar.set_label('-log₁₀(p-value)', rotation=270, labelpad=25, fontsize=16, weight='bold')
-    cbar.ax.tick_params(labelsize=14)
+    cbar.set_label('-log₁₀(p-value)', rotation=270, labelpad=25, fontsize=22, weight='bold')
+    cbar.ax.tick_params(labelsize=18)
 
     # 凡例のスタイル調整（枠なしに変更）
     cat_handles = [Patch(color=c, label=lab) for lab, c in category_colors.items()]
@@ -429,8 +429,8 @@ def create_comparison_bubble_plot(
         title='Functional Category\n(label colour)',
         loc='center left',
         borderpad=1.5,
-        fontsize=14,
-        title_fontsize=16,
+        fontsize=18,
+        title_fontsize=20,
         edgecolor='black',
         bbox_to_anchor=(-2.0, 0.9),
         frameon=False,  # 枠を消す
@@ -459,9 +459,9 @@ def create_comparison_bubble_plot(
         frameon=False,
         fancybox=False,
         shadow=False,
-        title_fontsize=16,
+        title_fontsize=20,
         columnspacing=1.0,           # 列間
-        fontsize=14,
+        fontsize=18,
         borderpad=1.5,
         handletextpad=1,
         markerscale=1.0,
