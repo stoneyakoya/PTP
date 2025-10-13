@@ -784,7 +784,7 @@ def main():
         timestamp = time.strftime("%Y_%m%d_%H%M%S")
 
         # デフォルトの共通パラメータ
-        default_model_type = "AASeq_Transformer_based"
+        default_model_type = "TimeSeq_LSTM"
         default_dataset_dir = f"data/dataset/sampling/fold_{i}"
 
         # argparseでの初期パース（model_typeのみ先に抽出）
@@ -828,9 +828,9 @@ def main():
             "criterion": "MSE",
             "optimizer": "Adam",
             "early_stop_patience": 6,
-            "early_stop_threshold": 0.001,
+            "early_stop_threshold": 0.01,
             "scheduler_patience": 3,
-            "scheduler_threshold": 0.001,
+            "scheduler_threshold": 0.02,
             "model_save_path": f"{model_save_dir}/model_{timestamp}.pth",
             "result_save_dir": f"{result_df_save_dir}/03_AASeq_Transformer_based_sampling/fold_{i}",
             "plt_save_dir": f"{plt_save_dir}/{timestamp}",

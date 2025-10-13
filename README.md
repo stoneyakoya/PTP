@@ -95,7 +95,7 @@ The following parameters can be modified via command-line arguments. If not spec
 
 | Parameter                  | Description                                                                                                                    | Default Value             |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------- |
-| `--model_type`           | Type of model architecture (e.g., Transformer, LSTM).                                                                          | `"Transformer"`         |
+| `--model_type`           | Type of model architecture (e.g., Transformer, LSTM).                                                                          | `"TimeSeq_LSTM"`        |
 | `--train_path`           | Path to the training dataset CSV file.                                                                                         | `"data/train.csv"`      |
 | `--val_path`             | Path to the validation dataset CSV file.                                                                                       | `"data/validation.csv"` |
 | `--test_path`            | Path to the testing dataset CSV file.                                                                                          | `"data/test.csv"`       |
@@ -112,9 +112,9 @@ The following parameters can be modified via command-line arguments. If not spec
 | `--num_epochs`           | Number of training epochs.                                                                                                     | `1`                     |
 | `--criterion`            | Loss function to use (e.g., MSE, MAE).                                                                                         | `"MSE"`                 |
 | `--optimizer`            | Optimizer to use (e.g., Adam, SGD).                                                                                            | `"Adam"`                |
-| `--early_stop_patience`  | Number of epochs to wait before stopping if no improvement is observed.                                                        | `15`                    |
-| `--early_stop_threshold` | Minimum improvement required to reset early stopping.                                                                          | `0.010`                 |
-| `--scheduler_patience`   | Number of epochs to wait before adjusting the learning rate.                                                                   | `5`                     |
+| `--early_stop_patience`  | Number of epochs to wait before stopping if no improvement is observed.                                                        | 6                         |
+| `--early_stop_threshold` | Minimum improvement required to reset early stopping.                                                                          | `0.01`                  |
+| `--scheduler_patience`   | Number of epochs to wait before adjusting the learning rate.                                                                   | 3                         |
 | `--scheduler_threshold`  | Minimum improvement required to adjust the learning rate.                                                                      | `0.02`                  |
 | `--model_save_path`      | Path to save the trained model.                                                                                                | `"data/models/...pth"`  |
 | `--result_save_dir`      | Directory to save results (predictions, metrics).                                                                              | `"data/results/.../"`   |
@@ -132,4 +132,3 @@ The following parameters can be modified via command-line arguments. If not spec
 ├── src/              # Core source code (e.g., training, evaluation, prediction)
 └── venv/             # virtual environment (excluded from version control)
 ```
-# PTP
