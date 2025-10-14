@@ -3,14 +3,43 @@ import os
 import numpy as np
 import pandas as pd
 import torch
+import warnings
+torch.backends.cudnn.enabled = False
+torch.backends.cudnn.benchmark = False
 import torch.nn as nn
 import torch.optim as optim
 from sklearn.metrics import r2_score
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+import random
 
 from datasets.custom_dataset_loader import Datasets_AASeqTimeSeq, collate_fn
-from models.unified import STCrossPredictor  # ※ 下記モデル定義に合わせてください
+from models.unified import STCrossPredictor  # unified model outputs (loss, inc, logK)
+
+warnings.filterwarnings("ignore", message=".*Support for mismatched key_padding_mask and attn_mask is deprecated.*")
+warnings.filterwarnings("ignore", message=".*verbose parameter is deprecated.*")
+
+# import K-fit utilities from k_eval (robust to being inside src/)
+try:
+    from k_eval import fit_k_loss, fit_k_incorp
+except Exception:
+    import sys as _sys, os as _os
+    _ROOT = _os.path.dirname(_os.path.dirname(__file__))
+    if _ROOT not in _sys.path:
+        _sys.path.append(_ROOT)
+    from k_eval import fit_k_loss, fit_k_incorp
+
+# Use 8-step times (exclude 0h) to match dataset time indexing
+T_SERIES = [1, 3, 6, 10, 16, 24, 34, 48]
+
+
+def _early_time_weights(t_idx_tensor: torch.Tensor, device: torch.device, early_hours=(1, 3, 6, 10), w_early: float = 3.0, w_late: float = 1.0) -> torch.Tensor:
+    # t_idx_tensor: (B, T) indices into T_SERIES
+    idx_np = t_idx_tensor.detach().cpu().numpy()
+    hours = np.take(np.asarray(T_SERIES, dtype=float), idx_np)
+    mask_early = (hours <= max(early_hours))
+    w = np.where(mask_early, w_early, w_late).astype(np.float32)
+    return torch.from_numpy(w).to(device)
 
 
 def run_model(
@@ -26,6 +55,7 @@ def run_model(
     weight_decay=1e-2,
     patience=3,
     lr_scheduler=True,
+    lambda_k: float = 0.2,
 ):
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
@@ -33,6 +63,7 @@ def run_model(
 
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     criterion = nn.MSELoss()
+    mae = nn.L1Loss()
     if lr_scheduler:
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
@@ -48,6 +79,8 @@ def run_model(
     for epoch in range(1, epochs + 1):
         model.train()
         train_loss = 0.0
+        # lambda warm-up up to target lambda_k
+        lambda_k_eff = float(min(lambda_k, lambda_k * (epoch / 5.0)))
         for batch in tqdm(train_loader, desc=f"[Train {epoch}/{epochs}]"):
             emb = batch["embedding"].to(device)
             mask = batch["mask"].to(device)
@@ -56,10 +89,37 @@ def run_model(
             y_inc = batch["y_inc"].to(device)
 
             optimizer.zero_grad()
-            loss_pred, inc_pred, attn_w = model(emb, mask, t_idx)
-            l1 = criterion(loss_pred, y_loss)
-            l2 = criterion(inc_pred, y_inc)
-            loss = l1 + l2
+            loss_pred, inc_pred, k_log_pred, attn_w = model(emb, mask, t_idx)
+            # early-time weighting on series losses
+            w = _early_time_weights(t_idx, device=emb.device, early_hours=(1, 3, 6, 10), w_early=2.0, w_late=1.0)
+            l1 = (criterion(loss_pred, y_loss) * w).mean()
+            l2 = (criterion(inc_pred, y_inc) * w).mean()
+
+            # auxiliary K loss using true series-derived logK (subsample to reduce overhead)
+            with torch.no_grad():
+                def batch_fit_logk_incorp(y_series):
+                    ys = y_series.detach().cpu().numpy()
+                    logs = []
+                    for i in range(ys.shape[0]):
+                        res = fit_k_incorp(np.clip(ys[i], 0.0, 1.0), np.asarray(T_SERIES))
+                        logs.append(float(np.log(res["K"])) if (res is not None and res["K"] > 0) else np.nan)
+                    return torch.tensor(logs, dtype=torch.float32, device=emb.device)
+
+                # 50%確率でKフィットを実施（高速化）
+                do_k = (random.random() < 0.5)
+                if do_k:
+                    logk_true = batch_fit_logk_incorp(y_inc)
+                else:
+                    logk_true = torch.full((emb.size(0),), float("nan"), dtype=torch.float32, device=emb.device)
+
+            # use single k_log head
+            # mask invalid logk_true
+            valid_mask = torch.isfinite(logk_true)
+            if valid_mask.any():
+                l_k = mae(k_log_pred[valid_mask], logk_true[valid_mask])
+                loss = l1 + l2 + lambda_k_eff * l_k
+            else:
+                loss = l1 + l2
             loss.backward()
             optimizer.step()
             train_loss += loss.item() * emb.size(0)
@@ -76,8 +136,28 @@ def run_model(
             y_inc = batch["y_inc"].to(device)
 
             with torch.no_grad():
-                loss_pred, inc_pred, attn_w = model(emb, mask, t_idx)
-                val_loss += (criterion(loss_pred, y_loss) + criterion(inc_pred, y_inc)).item() * emb.size(0)
+                loss_pred, inc_pred, k_log_pred, attn_w = model(emb, mask, t_idx)
+                # primary metric: MAE(logK_hat) from predicted series via fit
+                # compute per-sample logK_hat by fitting model-pred series of the correct turnover type
+                preds_loss = np.clip(loss_pred.detach().cpu().numpy(), 0.0, 1.0)
+                preds_inc = np.clip(inc_pred.detach().cpu().numpy(), 0.0, 1.0)
+                logk_hat_list = []
+                logk_true_list = []
+                # true series to compute logK_true reference
+                tr_loss = np.clip(y_loss.detach().cpu().numpy(), 0.0, 1.0)
+                tr_inc = np.clip(y_inc.detach().cpu().numpy(), 0.0, 1.0)
+                for i in range(preds_loss.shape[0]):
+                    # incorporation 固定評価（安定化）
+                    res_hat = fit_k_incorp(preds_inc[i], np.asarray(T_SERIES))
+                    res_true = fit_k_incorp(tr_inc[i], np.asarray(T_SERIES))
+                    if res_hat is not None and res_true is not None and res_hat["K"] > 0 and res_true["K"] > 0:
+                        logk_hat_list.append(np.log(res_hat["K"]))
+                        logk_true_list.append(np.log(res_true["K"]))
+                if len(logk_hat_list) > 0:
+                    mae_logk = float(np.mean(np.abs(np.array(logk_hat_list) - np.array(logk_true_list))))
+                else:
+                    mae_logk = float("inf")
+                val_loss += mae_logk * emb.size(0)
 
         val_loss /= len(val_ds)
         if lr_scheduler:
@@ -118,7 +198,7 @@ def run_model(
             clusters = batch["cluster"][:, 0].cpu().numpy()  # (B,)
             peptides = batch["peptide"]  # list of length B
 
-            loss_pred, inc_pred, _ = model(emb, mask, t_idx)
+            loss_pred, inc_pred, _, _ = model(emb, mask, t_idx)
             # turnover
             turn_pred = (inc_pred / (loss_pred + inc_pred)).cpu().numpy()  # (B, T)
             turn_true = (y_inc / (y_loss + y_inc)).cpu().numpy()  # (B, T)
@@ -202,7 +282,7 @@ def save_attention_by_cluster(test_loader, model, device, time_labels, max_lengt
             clusters = batch["cluster"][:, 0].cpu().numpy().astype(int)
 
             # モデル呼び出し
-            _, _, attn_w = model(emb, mask, t_idx)  # (B, T, T*L)
+            _, _, _, attn_w = model(emb, mask, t_idx)  # (B, T, T*L)
             attn_np = attn_w.cpu().numpy()  # numpy に
 
             B, T, TL = attn_np.shape
@@ -250,7 +330,6 @@ def save_attention_by_cluster(test_loader, model, device, time_labels, max_lengt
 
 
 if __name__ == "__main__":
-    mses = []
     r2s = []
     # 10回の実行を行う
     for i in range(0, 10):
@@ -275,7 +354,7 @@ if __name__ == "__main__":
         }
         model = STCrossPredictor(**cfg).to(device)
 
-        test_loss, overall_r2 = run_model(
+        overall_r2, cluster_r2 = run_model(
             model,
             train_ds,
             val_ds,
@@ -289,9 +368,7 @@ if __name__ == "__main__":
             patience=10,
             lr_scheduler=True,
         )
-        mses.append(test_loss)
         r2s.append(overall_r2)
-        print(f"Fold {i}: Test MSE Loss: {test_loss:.4f}, Overall R2: {overall_r2:.4f}")
-    mse_mean = np.mean(mses)
+        print(f"Fold {i}: Overall R2: {overall_r2:.4f}")
     r2_mean = np.mean(r2s)
-    print(f"Average Test MSE Loss: {mse_mean:.4f}, Overall R2: {r2_mean:.4f}")
+    print(f"Average Overall R2: {r2_mean:.4f}")

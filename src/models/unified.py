@@ -140,6 +140,7 @@ class MultiTaskDecoder(nn.Module):
         self.norm = nn.LayerNorm(d_model)
         self.out_loss = nn.Linear(d_model, 1)
         self.out_inc = nn.Linear(d_model, 1)
+        self.out_k = nn.Linear(d_model, 1)
         self.feature = feature
 
     def forward(self, enc_tokens, mask):
@@ -148,6 +149,7 @@ class MultiTaskDecoder(nn.Module):
         returns:
           loss_pred (B, T)
           inc_pred  (B, T)
+          k_log     (B,)
         """
         # enc_tokens: (B, T*L, H)
         B, TL, H = enc_tokens.shape
@@ -169,11 +171,11 @@ class MultiTaskDecoder(nn.Module):
             query_time = torch.arange(T, device=enc_tokens.device).unsqueeze(1)  # (T,1)
             # allow only token_time ≤ query_time
             allow = token_time <= query_time  # (T, TL)
-            inf = float("-1e9")
-            attn_mask = torch.where(allow, 0.0, inf)  # 0=keep, -inf=mask
+            # Use boolean attn_mask (True = mask) to match key_padding_mask type
+            attn_mask_bool = ~allow
 
             attn_out, attn_w = self.cross_attn(
-                Q, KV, KV, attn_mask=attn_mask, key_padding_mask=key_mask, need_weights=True, average_attn_weights=True
+                Q, KV, KV, attn_mask=attn_mask_bool, key_padding_mask=key_mask, need_weights=True, average_attn_weights=True
             )
         else:
             attn_out, attn_w = self.cross_attn(
@@ -184,7 +186,11 @@ class MultiTaskDecoder(nn.Module):
 
         loss_pred = self.out_loss(attn_out).squeeze(-1).transpose(0, 1)
         inc_pred = self.out_inc(attn_out).squeeze(-1).transpose(0, 1)
-        return loss_pred, inc_pred, attn_w
+
+        # pool time queries and predict logK
+        pooled = attn_out.mean(dim=0)  # (B, H)
+        k_log = self.out_k(pooled).squeeze(-1)  # (B,)
+        return loss_pred, inc_pred, k_log, attn_w
 
 
 class STCrossPredictor(nn.Module):
@@ -207,6 +213,7 @@ class STCrossPredictor(nn.Module):
         returns:
           loss_pred: (B, T)
           inc_pred:  (B, T)
+          k_log:     (B,)
         """
         z, _ = self.input_proj(embedding, t_idx)
         for blk in self.encoder:

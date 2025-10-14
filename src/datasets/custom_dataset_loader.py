@@ -381,6 +381,10 @@ class Datasets_AASeqTimeSeq(Dataset):
             targets_TurnoverRate = sub_sorted["Target_TurnoverRate"].values.astype(np.float32)  # (8,)
             timesteps = sub_sorted["timestep"].map(self.time2idx).values.astype(np.int64)  # (8,)
             cluster = sub_sorted["Cluster"].values.astype(np.float32)  # (8,)
+            # optional K targets per peptide (use row-wise columns if provided, else NaN)
+            logk_loss = np.log(np.clip(sub_sorted["loss_K"].values[0] if "loss_K" in sub_sorted.columns else np.nan, a_min=np.finfo(float).tiny, a_max=None)) if "loss_K" in sub_sorted.columns else np.nan
+            logk_inc = np.log(np.clip(sub_sorted["incorporation_K"].values[0] if "incorporation_K" in sub_sorted.columns else np.nan, a_min=np.finfo(float).tiny, a_max=None)) if "incorporation_K" in sub_sorted.columns else np.nan
+
             self.seq.append(
                 {
                     "peptide": pep,
@@ -390,6 +394,8 @@ class Datasets_AASeqTimeSeq(Dataset):
                     "targets_LabelIncorporation": targets_LabelIncorporation,
                     "targets_TurnoverRate": targets_TurnoverRate,
                     "cluster": cluster,
+                    "logk_loss": logk_loss,
+                    "logk_inc": logk_inc,
                 }
             )
         # デバッグ用
@@ -434,6 +440,8 @@ class Datasets_AASeqTimeSeq(Dataset):
             "y_inc": y_inc,  # (8,)
             "y_turn": y_turn,  # (8,)
             "cluster": cluster,  # (8,)
+            "logk_loss_true": torch.tensor(item["logk_loss"], dtype=torch.float32) if not np.isnan(item["logk_loss"]) else torch.tensor(float("nan")),
+            "logk_inc_true": torch.tensor(item["logk_inc"], dtype=torch.float32) if not np.isnan(item["logk_inc"]) else torch.tensor(float("nan")),
         }
 
 
@@ -456,6 +464,8 @@ def collate_fn(batch):
         "y_turn": y_turn,
         "cluster": clusters,
         "peptide": peptides,
+        "logk_loss_true": torch.stack([b["logk_loss_true"] for b in batch], dim=0),
+        "logk_inc_true": torch.stack([b["logk_inc_true"] for b in batch], dim=0),
     }
 
 
