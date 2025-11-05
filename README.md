@@ -134,3 +134,26 @@ The following parameters can be modified via command-line arguments. If not spec
 ├── src/              # Core source code (e.g., training, evaluation, prediction)
 └── venv/             # virtual environment (excluded from version control)
 ```
+
+## K Evaluation (pSILAC-TMT)
+
+Robust fitting of turnover rate parameter K from evidence-level time series, aggregated and evaluated versus `comb.K`.
+
+Usage:
+
+```bash
+python k_eval.py --csv data/raw/pSILAC_TMT.csv --outdir results
+```
+
+Outputs in `results/`:
+- `k_eval.csv`: `Peptidoform, TurnoverType, K_pred_group, comb.K, logK_pred, logK_true, logK_err_abs, Delta_logK`
+- `scatter_Kpred_vs_combK_loglog.png`: log-log scatter with 45° line
+- `boxplot_MAE_logK.png`: per-group |logK error| by TurnoverType
+- `violin_R2_evidence.png`: evidence-level R² distribution
+- `roc_fast_slow.png`: ROC for fast/slow classification (threshold = median comb.K)
+
+Notes:
+- Models: loss `y = A*exp(-K*t) + B`, incorporation `y = A*(1 - exp(-K*t)) + B`
+- Robust fit: `scipy.optimize.least_squares(loss='soft_l1', bounds: A>=0, K>=0)`
+- Time points: `corrRatio_0h,...,corrRatio_48h`; `corrRatio_infin.h` excluded from fit
+- Evaluation uses groups with `comb.Rsq >= 0.8`
