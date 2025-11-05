@@ -11,12 +11,12 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 # import data_loader
-from datasets.custom_dataset_loader import Datasets_AASeq, Datasets_TimeSeq, Datasets_TimeSeq_AAC, pad_peptide_embedding
+from .datasets.custom_dataset_loader import Datasets_AASeq, Datasets_TimeSeq, Datasets_TimeSeq_AAC, pad_peptide_embedding
 
 # import model
-from models.GRU import GRU
-from models.LSTM import LSTM
-from models.Transformer_based import Transformer_AASeq, Transformer_TimeSeq
+from .models.GRU import GRU
+from .models.LSTM import LSTM
+from .models.Transformer_based import Transformer_AASeq, Transformer_TimeSeq
 
 # check
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -36,6 +36,7 @@ def train_model(
     threshold=0.01,
     scheduler=None,
     model_type=1,
+    target_mode: str = "both",
 ):
     model.train()
     early_stopping = EarlyStopping(patience=patience, threshold=threshold)
@@ -59,6 +60,9 @@ def train_model(
                 outputs = model(features_x)
                 target_loss = batch["target_loss"].to(device)
                 target_incorporation = batch["target_incorporation"].to(device)
+                target_turnover = batch.get("target_turnover", None)
+                if target_turnover is not None:
+                    target_turnover = target_turnover.to(device)
 
                 # Early point weight
                 timestep_tensor = torch.stack(timestep).float().to(target_loss.device)
@@ -68,10 +72,26 @@ def train_model(
                     torch.tensor(1.0, device=timestep_tensor.device),
                 )
 
-                loss_loss = (criterion(outputs[0], target_loss.unsqueeze(-1)) * weights).mean()
-                loss_incorporation = (criterion(outputs[1], target_incorporation.unsqueeze(-1)) * weights).mean()
-
-                total_loss = loss_loss + loss_incorporation
+                if target_mode == "turnover":
+                    # direct turnover if provided by model; else derive from loss/incorp
+                    if isinstance(outputs, (list, tuple)) and len(outputs) >= 3:
+                        pred_turnover = outputs[2]
+                    else:
+                        eps = 1e-8
+                        pred_turnover = outputs[1] / (outputs[1] + outputs[0] + eps)
+                    if target_turnover is None:
+                        raise ValueError("target_turnover not found in batch for turnover training")
+                    loss_turnover = (criterion(pred_turnover, target_turnover.unsqueeze(-1)) * weights).mean()
+                    total_loss = loss_turnover
+                elif target_mode == "incorp":
+                    # incorporation only
+                    loss_incorporation = (criterion(outputs[1], target_incorporation.unsqueeze(-1)) * weights).mean()
+                    total_loss = loss_incorporation
+                else:
+                    # multitask: loss + incorporation
+                    loss_loss = (criterion(outputs[0], target_loss.unsqueeze(-1)) * weights).mean()
+                    loss_incorporation = (criterion(outputs[1], target_incorporation.unsqueeze(-1)) * weights).mean()
+                    total_loss = loss_loss + loss_incorporation
 
             elif "AASeq":
                 cluster_ids = batch["cluster"].cpu().numpy()  # shape: [B]
@@ -86,6 +106,7 @@ def train_model(
                     "features_incorporation",
                     "target_loss",
                     "target_incorporation",
+                    "target_turnover",
                     "timestep",
                 ]:
                     if key in batch:
@@ -100,6 +121,9 @@ def train_model(
                 outputs = model(features_loss, features_incorporation)
                 target_loss = batch["target_loss"].to(device)
                 target_incorporation = batch["target_incorporation"].to(device)
+                target_turnover = batch.get("target_turnover", None)
+                if target_turnover is not None:
+                    target_turnover = target_turnover.to(device)
 
                 # Early point weight
                 timestep_tensor = timestep.float().to(target_loss.device)
@@ -109,10 +133,26 @@ def train_model(
                     torch.tensor(1.0, device=timestep_tensor.device),
                 )
 
-                loss_loss = (criterion(outputs[0], target_loss.unsqueeze(-1)) * weights).mean()
-                loss_incorporation = (criterion(outputs[1], target_incorporation.unsqueeze(-1)) * weights).mean()
-                # calculation loss
-                total_loss = loss_loss + loss_incorporation
+                if target_mode == "turnover":
+                    if isinstance(outputs, (list, tuple)) and len(outputs) >= 3:
+                        pred_turnover = outputs[2]
+                    else:
+                        eps = torch.tensor(1e-8, device=outputs[0].device)
+                        pred_turnover = outputs[1] / (outputs[1] + outputs[0] + eps)
+                    if target_turnover is None:
+                        raise ValueError("target_turnover not found in batch for turnover training")
+                    # Ensure shapes match: both (batch, 1)
+                    pred_turnover = pred_turnover.view(-1, 1)
+                    target_turnover = target_turnover.view(-1, 1)
+                    loss_turnover = (criterion(pred_turnover, target_turnover) * weights.view(-1, 1)).mean()
+                    total_loss = loss_turnover
+                elif target_mode == "incorp":
+                    loss_incorporation = (criterion(outputs[1], target_incorporation.unsqueeze(-1)) * weights).mean()
+                    total_loss = loss_incorporation
+                else:
+                    loss_loss = (criterion(outputs[0], target_loss.unsqueeze(-1)) * weights).mean()
+                    loss_incorporation = (criterion(outputs[1], target_incorporation.unsqueeze(-1)) * weights).mean()
+                    total_loss = loss_loss + loss_incorporation
 
             # debug
             if i == 0 and epoch == 0:
@@ -126,8 +166,15 @@ def train_model(
                     print("[DEBUG] features_loss.shape =", features_loss.shape)
                     print("[DEBUG] features_loss =", features_loss)
                 print("-" * 10)
-                print("[DEBUG] target_loss.shape =", target_loss.shape)
-                print("[DEBUG] target_loss =", target_loss)
+                if target_mode == "turnover":
+                    print("[DEBUG] target_turnover.shape =", (target_turnover.shape if target_turnover is not None else None))
+                    print("[DEBUG] target_turnover =", target_turnover)
+                elif target_mode == "incorp":
+                    print("[DEBUG] target_incorporation.shape =", target_incorporation.shape)
+                    print("[DEBUG] target_incorporation =", target_incorporation)
+                else:
+                    print("[DEBUG] target_loss.shape =", target_loss.shape)
+                    print("[DEBUG] target_loss =", target_loss)
 
             total_loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -136,8 +183,8 @@ def train_model(
 
         # train_loss
         train_loss /= len(train_loader)
-        # evaluate_loss
-        val_loss = evaluate_model(model, val_loader, criterion, model_type)
+        # evaluate_loss (respect training target_mode)
+        val_loss = evaluate_model(model, val_loader, criterion, model_type, target_mode)
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -198,7 +245,7 @@ def get_allowed_clusters(epoch, ranked_clusters=[2, 0, 3, 1, 4]):
         return ranked_clusters
 
 
-def evaluate_model(model, loader, criterion, model_type):
+def evaluate_model(model, loader, criterion, model_type, target_mode: str = "both"):
     model.eval()
     total_loss = 0.0
     with torch.no_grad():
@@ -214,10 +261,27 @@ def evaluate_model(model, loader, criterion, model_type):
                     torch.tensor(2.0, device=timestep_tensor.device),
                     torch.tensor(1.0, device=timestep_tensor.device),
                 )
-                loss_loss = (criterion(outputs[0], target_loss.unsqueeze(-1)) * weights).mean()
-                loss_incorp = (criterion(outputs[1], target_incorp.unsqueeze(-1)) * weights).mean()
-
-                total_loss += loss_loss + loss_incorp
+                if target_mode == "turnover":
+                    target_turn = batch.get("target_turnover", None)
+                    if target_turn is None:
+                        raise ValueError("target_turnover not found in batch for turnover eval")
+                    target_turn = target_turn.to(device)
+                    if isinstance(outputs, (list, tuple)) and len(outputs) >= 3:
+                        pred_turn = outputs[2]
+                    else:
+                        eps = 1e-8
+                        pred_turn = outputs[1] / (outputs[1] + outputs[0] + eps)
+                    pred_turn = pred_turn.view(-1, 1)
+                    target_turn = target_turn.view(-1, 1)
+                    loss_turn = (criterion(pred_turn, target_turn) * weights.view(-1, 1)).mean()
+                    total_loss += loss_turn
+                elif target_mode == "incorp":
+                    loss_incorp = (criterion(outputs[1], target_incorp.unsqueeze(-1)) * weights).mean()
+                    total_loss += loss_incorp
+                else:
+                    loss_loss = (criterion(outputs[0], target_loss.unsqueeze(-1)) * weights).mean()
+                    loss_incorp = (criterion(outputs[1], target_incorp.unsqueeze(-1)) * weights).mean()
+                    total_loss += loss_loss + loss_incorp
             elif "AASeq":
                 features_loss = batch["features_loss"].to(device)
                 features_incorporation = batch["features_incorporation"].to(device)
@@ -232,15 +296,30 @@ def evaluate_model(model, loader, criterion, model_type):
                     torch.tensor(2.0, device=timestep_tensor.device),
                     torch.tensor(1.0, device=timestep_tensor.device),
                 )
-                loss_loss = (criterion(outputs[0], target_loss.unsqueeze(-1)) * weights).mean()
-                loss_incorp = (criterion(outputs[1], target_incorp.unsqueeze(-1)) * weights).mean()
-
-                total_loss += loss_loss + loss_incorp
+                if target_mode == "turnover":
+                    target_turn = batch.get("target_turnover", None)
+                    if target_turn is None:
+                        raise ValueError("target_turnover not found in batch for turnover eval")
+                    target_turn = target_turn.to(device)
+                    if isinstance(outputs, (list, tuple)) and len(outputs) >= 3:
+                        pred_turn = outputs[2]
+                    else:
+                        eps = torch.tensor(1e-8, device=outputs[0].device)
+                        pred_turn = outputs[1] / (outputs[1] + outputs[0] + eps)
+                    loss_turn = (criterion(pred_turn, target_turn.unsqueeze(-1)) * weights).mean()
+                    total_loss += loss_turn
+                elif target_mode == "incorp":
+                    loss_incorp = (criterion(outputs[1], target_incorp.unsqueeze(-1)) * weights).mean()
+                    total_loss += loss_incorp
+                else:
+                    loss_loss = (criterion(outputs[0], target_loss.unsqueeze(-1)) * weights).mean()
+                    loss_incorp = (criterion(outputs[1], target_incorp.unsqueeze(-1)) * weights).mean()
+                    total_loss += loss_loss + loss_incorp
 
     return total_loss / len(loader)
 
 
-def test_model_TimeSeq(model, test_loader, result_save_dir, device=None):
+def test_model_TimeSeq(model, test_loader, result_save_dir, device=None, target_mode: str = "both"):
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.eval()
@@ -270,29 +349,51 @@ def test_model_TimeSeq(model, test_loader, result_save_dir, device=None):
                 all_timesteps.extend(timesteps)
                 all_peptides.extend([peptide] * len(timesteps))
                 all_clusters.extend([cluster_id] * len(timesteps))
-                preds_loss.extend(outputs[0][b, :, 0].cpu().numpy().tolist())
-                preds_incorporation.extend(outputs[1][b, :, 0].cpu().numpy().tolist())
+                if target_mode == "both":
+                    preds_loss.extend(outputs[0][b, :, 0].cpu().numpy().tolist())
+                    preds_incorporation.extend(outputs[1][b, :, 0].cpu().numpy().tolist())
+                elif target_mode == "incorp":
+                    preds_incorporation.extend(outputs[1][b, :, 0].cpu().numpy().tolist())
 
-                epsilon = 1e-8
-                turnover_values = outputs[1][b, :, 0] / (outputs[1][b, :, 0] + outputs[0][b, :, 0] + epsilon)
-                preds_turnover.extend(turnover_values.cpu().numpy().tolist())
-                targets_loss.extend(target_loss[b, :].cpu().numpy().tolist())
-                targets_incorporation.extend(target_incorporation[b, :].cpu().numpy().tolist())
+                # Use direct turnover head if present
+                if isinstance(outputs, (list, tuple)) and len(outputs) >= 3:
+                    preds_turnover.extend(outputs[2][b, :, 0].cpu().numpy().tolist())
+                else:
+                    epsilon = 1e-8
+                    turnover_values = outputs[1][b, :, 0] / (outputs[1][b, :, 0] + outputs[0][b, :, 0] + epsilon)
+                    preds_turnover.extend(turnover_values.cpu().numpy().tolist())
+                if target_mode == "both":
+                    targets_loss.extend(target_loss[b, :].cpu().numpy().tolist())
+                    targets_incorporation.extend(target_incorporation[b, :].cpu().numpy().tolist())
+                elif target_mode == "incorp":
+                    targets_incorporation.extend(target_incorporation[b, :].cpu().numpy().tolist())
                 targets_turnover.extend(target_turnover[b, :].cpu().numpy().tolist())
 
         # train_df = sample_peptides_for_datasize(train_df, train_size)
 
-    rmse_loss = np.sqrt(mean_squared_error(targets_loss, preds_loss))
-    rmse_incorp = np.sqrt(mean_squared_error(targets_incorporation, preds_incorporation))
     rmse_turn = np.sqrt(mean_squared_error(targets_turnover, preds_turnover))
-    r2_loss = r2_score(targets_loss, preds_loss)
-    r2_incorp = r2_score(targets_incorporation, preds_incorporation)
     r2_turn = r2_score(targets_turnover, preds_turnover)
-    results_text = (
-        f"Test RMSE (Loss): {rmse_loss:.4f}, R2 Score (Loss): {r2_loss:.4f}\n"
-        f"Test RMSE (Incorporation): {rmse_incorp:.4f}, R2 Score (Incorporation): {r2_incorp:.4f}\n"
-        f"Test RMSE (Turnover): {rmse_turn:.4f}, R2 Score (Turnover): {r2_turn:.4f}"
-    )
+    if target_mode == "both":
+        rmse_loss = np.sqrt(mean_squared_error(targets_loss, preds_loss))
+        rmse_incorp = np.sqrt(mean_squared_error(targets_incorporation, preds_incorporation))
+        r2_loss = r2_score(targets_loss, preds_loss)
+        r2_incorp = r2_score(targets_incorporation, preds_incorporation)
+        results_text = (
+            f"Test RMSE (Loss): {rmse_loss:.4f}, R2 Score (Loss): {r2_loss:.4f}\n"
+            f"Test RMSE (Incorporation): {rmse_incorp:.4f}, R2 Score (Incorporation): {r2_incorp:.4f}\n"
+            f"Test RMSE (Turnover): {rmse_turn:.4f}, R2 Score (Turnover): {r2_turn:.4f}"
+        )
+    elif target_mode == "incorp":
+        rmse_incorp = np.sqrt(mean_squared_error(targets_incorporation, preds_incorporation))
+        r2_incorp = r2_score(targets_incorporation, preds_incorporation)
+        results_text = (
+            f"Test RMSE (Incorporation): {rmse_incorp:.4f}, R2 Score (Incorporation): {r2_incorp:.4f}\n"
+            f"Test RMSE (Turnover): {rmse_turn:.4f}, R2 Score (Turnover): {r2_turn:.4f}"
+        )
+    else:
+        results_text = (
+            f"Test RMSE (Turnover): {rmse_turn:.4f}, R2 Score (Turnover): {r2_turn:.4f}"
+        )
     print(results_text)
 
     print(f"Length of peptides: {len(all_peptides)}")
@@ -304,29 +405,57 @@ def test_model_TimeSeq(model, test_loader, result_save_dir, device=None):
     print(f"Length of targets_turnover: {len(targets_turnover)}")
     print(f"Length of preds_turnover: {len(preds_turnover)}")
 
-    # DataFrame
-    results_df = pd.DataFrame(
-        {
+    # DataFrame (columns depend on target_mode)
+    if target_mode == "incorp":
+        df_dict = {
             "Peptide_ID": all_peptides,
+            "Timesteps": all_timesteps,
+            "Cluster": all_clusters,
+            "True_Values_Incorporation": targets_incorporation,
+            "Predictions_Incorporation": preds_incorporation,
+        }
+    elif target_mode == "both":
+        df_dict = {
+            "Peptide_ID": all_peptides,
+            "Timesteps": all_timesteps,
+            "Cluster": all_clusters,
             "True_Values_Loss": targets_loss,
             "Predictions_Loss": preds_loss,
             "True_Values_Incorporation": targets_incorporation,
             "Predictions_Incorporation": preds_incorporation,
             "True_Values_Turnover": targets_turnover,
             "Predictions_Turnover": preds_turnover,
+        }
+    else:  # turnover
+        df_dict = {
+            "Peptide_ID": all_peptides,
+            "True_Values_Turnover": targets_turnover,
+            "Predictions_Turnover": preds_turnover,
             "Timesteps": all_timesteps,
             "Cluster": all_clusters,
         }
-    )
+    results_df = pd.DataFrame(df_dict)
     print(results_df)
     scores = {
-        "RMSE_Loss": rmse_loss,
-        "R2_Loss": r2_loss,
-        "RMSE_Incorporation": rmse_incorp,
-        "R2_Incorporation": r2_incorp,
         "RMSE_Turnover": rmse_turn,
         "R2_Turnover": r2_turn,
     }
+    if target_mode == "both":
+        scores.update(
+            {
+                "RMSE_Loss": rmse_loss,
+                "R2_Loss": r2_loss,
+                "RMSE_Incorporation": rmse_incorp,
+                "R2_Incorporation": r2_incorp,
+            }
+        )
+    elif target_mode == "incorp":
+        scores.update(
+            {
+                "RMSE_Incorporation": rmse_incorp,
+                "R2_Incorporation": r2_incorp,
+            }
+        )
     print(scores)
     os.makedirs(result_save_dir, exist_ok=True)
     results_save_path = os.path.join(result_save_dir, "test_results.csv")
@@ -338,35 +467,44 @@ def test_model_TimeSeq(model, test_loader, result_save_dir, device=None):
         df_cluster = results_df[results_df["Cluster"] == cluster_id]
         n_peptides = df_cluster["Peptide_ID"].nunique()
 
-        rmse_loss = np.sqrt(mean_squared_error(df_cluster["True_Values_Loss"], df_cluster["Predictions_Loss"]))
-        r2_loss = r2_score(df_cluster["True_Values_Loss"], df_cluster["Predictions_Loss"])
+        entry = {"Cluster": int(cluster_id), "Peptides": int(n_peptides)}
 
-        rmse_incorp = np.sqrt(
-            mean_squared_error(
-                df_cluster["True_Values_Incorporation"],
-                df_cluster["Predictions_Incorporation"],
-            )
-        )
-        r2_incorp = r2_score(
-            df_cluster["True_Values_Incorporation"],
-            df_cluster["Predictions_Incorporation"],
-        )
-
-        rmse_turn = np.sqrt(mean_squared_error(df_cluster["True_Values_Turnover"], df_cluster["Predictions_Turnover"]))
-        r2_turn = r2_score(df_cluster["True_Values_Turnover"], df_cluster["Predictions_Turnover"])
-
-        cluster_metrics.append(
-            {
-                "Cluster": int(cluster_id),
-                "Peptides": int(n_peptides),
-                "RMSE_Loss": round(rmse_loss, 4),
-                "R2_Loss": round(r2_loss, 4),
+        # Metrics depend on target_mode
+        if target_mode == "incorp":
+            rmse_incorp = np.sqrt(mean_squared_error(df_cluster["True_Values_Incorporation"], df_cluster["Predictions_Incorporation"]))
+            r2_incorp = r2_score(df_cluster["True_Values_Incorporation"], df_cluster["Predictions_Incorporation"]) 
+            entry.update({
                 "RMSE_Incorporation": round(rmse_incorp, 4),
                 "R2_Incorporation": round(r2_incorp, 4),
+            })
+        else:
+            # Turnover always for turnover/both
+            rmse_turn = np.sqrt(
+                mean_squared_error(df_cluster.get("True_Values_Turnover", []), df_cluster.get("Predictions_Turnover", []))
+            )
+            r2_turn = r2_score(df_cluster.get("True_Values_Turnover", []), df_cluster.get("Predictions_Turnover", []))
+            entry.update({
                 "RMSE_Turnover": round(rmse_turn, 4),
                 "R2_Turnover": round(r2_turn, 4),
-            }
-        )
+            })
+
+        # Loss/Incorporation if present (both-mode)
+        if target_mode == "both" and "True_Values_Loss" in df_cluster.columns:
+            rmse_loss = np.sqrt(mean_squared_error(df_cluster["True_Values_Loss"], df_cluster["Predictions_Loss"]))
+            r2_loss = r2_score(df_cluster["True_Values_Loss"], df_cluster["Predictions_Loss"]) 
+            entry.update({
+                "RMSE_Loss": round(rmse_loss, 4),
+                "R2_Loss": round(r2_loss, 4),
+            })
+        if target_mode == "both" and "True_Values_Incorporation" in df_cluster.columns:
+            rmse_incorp = np.sqrt(mean_squared_error(df_cluster["True_Values_Incorporation"], df_cluster["Predictions_Incorporation"]))
+            r2_incorp = r2_score(df_cluster["True_Values_Incorporation"], df_cluster["Predictions_Incorporation"]) 
+            entry.update({
+                "RMSE_Incorporation": round(rmse_incorp, 4),
+                "R2_Incorporation": round(r2_incorp, 4),
+            })
+
+        cluster_metrics.append(entry)
 
     cluster_metrics_df = pd.DataFrame(cluster_metrics)
     cluster_scores_path = os.path.join(result_save_dir, "cluster_scores.csv")
@@ -376,11 +514,11 @@ def test_model_TimeSeq(model, test_loader, result_save_dir, device=None):
     return results_df, scores
 
 
-def test_model_AASeq(model, test_loader, results_save_dir):
+def test_model_AASeq(model, test_loader, results_save_dir, target_mode: str = "both"):
     model.eval()
     preds_loss, preds_incorporation, preds_turnover = [], [], []
     targets_loss, targets_incorporation, targets_turnover = [], [], []
-    peptides, timesteps = [], []
+    peptides, timesteps, clusters = [], [], []
 
     with torch.no_grad():
         for batch in test_loader:
@@ -394,69 +532,145 @@ def test_model_AASeq(model, test_loader, results_save_dir):
             outputs = model(features_loss, features_incorporation)
             output_loss = outputs[0]
             output_incorporation = outputs[1]
-            epsilon = torch.tensor(1e-8, device=output_incorporation.device)
-            denominator = output_incorporation + output_loss + epsilon
-            output_turnover = output_incorporation / denominator
-            output_turnover[denominator == epsilon] = 0.0
+            # Robust handling: only treat outputs[2] as turnover if it's a (B,1) head
+            if (
+                isinstance(outputs, (list, tuple))
+                and len(outputs) >= 3
+                and torch.is_tensor(outputs[2])
+                and outputs[2].dim() == 2
+                and outputs[2].size(1) == 1
+            ):
+                output_turnover = outputs[2]
+            else:
+                epsilon = torch.tensor(1e-8, device=output_incorporation.device)
+                denominator = output_incorporation + output_loss + epsilon
+                output_turnover = output_incorporation / denominator
+                output_turnover[denominator == epsilon] = 0.0
 
-            # 予測値を記録
-            preds_loss.extend(output_loss.cpu().numpy().tolist())
-            preds_incorporation.extend(output_incorporation.cpu().numpy().tolist())
-            preds_turnover.extend(output_turnover.cpu().numpy().tolist())
+            # 予測値を記録（1次元配列に揃える）
+            if target_mode != "turnover":
+                preds_loss.extend(output_loss.view(-1).cpu().numpy().tolist())
+                preds_incorporation.extend(output_incorporation.view(-1).cpu().numpy().tolist())
+            preds_turnover.extend(output_turnover.view(-1).cpu().numpy().tolist())
 
-            # 実際のターゲット値を記録
-            targets_loss.extend(target_loss.cpu().numpy().tolist())
-            targets_incorporation.extend(target_incorporation.cpu().numpy().tolist())
-            targets_turnover.extend(target_turnover.cpu().numpy().tolist())
+            # 実際のターゲット値を記録（1次元配列に揃える）
+            if target_mode != "turnover":
+                targets_loss.extend(target_loss.view(-1).cpu().numpy().tolist())
+                targets_incorporation.extend(target_incorporation.view(-1).cpu().numpy().tolist())
+            targets_turnover.extend(target_turnover.view(-1).cpu().numpy().tolist())
             peptide = batch["peptide"]
             timestep = batch["timestep"]
+            cluster = batch.get("cluster", None)
             peptides.extend(peptide)
             timesteps.extend(timestep.cpu().numpy().tolist())
+            if cluster is not None:
+                clusters.extend(cluster.cpu().numpy().astype(int).tolist())
 
-    # 評価指標の計算
-    rmse_loss = np.sqrt(mean_squared_error(targets_loss, preds_loss))
-    rmse_incorporation = np.sqrt(mean_squared_error(targets_incorporation, preds_incorporation))
+    # 評価指標の計算（全体）
     rmse_turnover = np.sqrt(mean_squared_error(targets_turnover, preds_turnover))
-    r2_loss = r2_score(targets_loss, preds_loss)
-    r2_incorporation = r2_score(targets_incorporation, preds_incorporation)
     r2_turnover = r2_score(targets_turnover, preds_turnover)
 
     # RMSEとR2の結果を文字列としてまとめる
-    results_text = (
-        f"Test RMSE (Loss): {rmse_loss:.4f}, R2 Score (Loss): {r2_loss:.4f}\n"
-        f"Test RMSE (Incorporation): {rmse_incorporation:.4f}, R2 Score (Incorporation): {r2_incorporation:.4f}\n"
-        f"Test RMSE (TurnoverRate): {rmse_turnover:.4f}, R2 Score (TurnoverRate): {r2_turnover:.4f}"
-    )
+    if target_mode == "both":
+        rmse_loss = np.sqrt(mean_squared_error(targets_loss, preds_loss))
+        rmse_incorporation = np.sqrt(mean_squared_error(targets_incorporation, preds_incorporation))
+        r2_loss = r2_score(targets_loss, preds_loss)
+        r2_incorporation = r2_score(targets_incorporation, preds_incorporation)
+        results_text = (
+            f"Test RMSE (Loss): {rmse_loss:.4f}, R2 Score (Loss): {r2_loss:.4f}\n"
+            f"Test RMSE (Incorporation): {rmse_incorporation:.4f}, R2 Score (Incorporation): {r2_incorporation:.4f}\n"
+            f"Test RMSE (TurnoverRate): {rmse_turnover:.4f}, R2 Score (TurnoverRate): {r2_turnover:.4f}"
+        )
+    elif target_mode == "incorp":
+        rmse_incorporation = np.sqrt(mean_squared_error(targets_incorporation, preds_incorporation))
+        r2_incorporation = r2_score(targets_incorporation, preds_incorporation)
+        results_text = (
+            f"Test RMSE (Incorporation): {rmse_incorporation:.4f}, R2 Score (Incorporation): {r2_incorporation:.4f}\n"
+            f"Test RMSE (TurnoverRate): {rmse_turnover:.4f}, R2 Score (TurnoverRate): {r2_turnover:.4f}"
+        )
+    else:
+        results_text = (
+            f"Test RMSE (TurnoverRate): {rmse_turnover:.4f}, R2 Score (TurnoverRate): {r2_turnover:.4f}"
+        )
 
     print(results_text)
 
     # RMSEとR2の結果を返す
     scores = {
-        "RMSE_Loss": rmse_loss,
-        "R2_Loss": r2_loss,
-        "RMSE_Incorporation": rmse_incorporation,
-        "R2_Incorporation": r2_incorporation,
         "RMSE_TurnoverRate": rmse_turnover,
         "R2_TurnoverRate": r2_turnover,
     }
+    if target_mode == "both":
+        scores.update(
+            {
+                "RMSE_Loss": rmse_loss,
+                "R2_Loss": r2_loss,
+                "RMSE_Incorporation": rmse_incorporation,
+                "R2_Incorporation": r2_incorporation,
+            }
+        )
+    elif target_mode == "incorp":
+        scores.update(
+            {
+                "RMSE_Incorporation": rmse_incorporation,
+                "R2_Incorporation": r2_incorporation,
+            }
+        )
 
     # 結果をデータフレームとしてまとめる
-    results_df = pd.DataFrame(
-        {
-            "Peptide_ID": peptides,
-            "True_Values_Loss": targets_loss,
-            "Predictions_Loss": preds_loss,
-            "True_Values_Incorporation": targets_incorporation,
-            "Predictions_Incorporation": preds_incorporation,
-            "True_Values_Turnover": targets_turnover,
-            "Predictions_Turnover": preds_turnover,
-            "Timesteps": timesteps,
-        }
-    )
+    df_dict = {
+        "Peptide_ID": peptides,
+        "True_Values_Turnover": targets_turnover,
+        "Predictions_Turnover": preds_turnover,
+        "Timesteps": timesteps,
+    }
+    if target_mode == "both":
+        df_dict.update(
+            {
+                "True_Values_Loss": targets_loss,
+                "Predictions_Loss": preds_loss,
+                "True_Values_Incorporation": targets_incorporation,
+                "Predictions_Incorporation": preds_incorporation,
+            }
+        )
+    elif target_mode == "incorp":
+        df_dict.update(
+            {
+                "True_Values_Incorporation": targets_incorporation,
+                "Predictions_Incorporation": preds_incorporation,
+            }
+        )
+    if len(clusters) == len(peptides):
+        df_dict["Cluster"] = clusters
+    results_df = pd.DataFrame(df_dict)
 
     os.makedirs(results_save_dir, exist_ok=True)
-    results_save_path = os.path.join(results_save_dir, "non_recursive.csv")
-    results_df.to_csv(results_save_path)
+    # 互換用のファイルと統一フォーマットの両方を保存
+    results_df.to_csv(os.path.join(results_save_dir, "non_recursive.csv"), index=False)
+    results_df.to_csv(os.path.join(results_save_dir, "test_results.csv"), index=False)
+
+    # クラスタ別メトリクス
+    if "Cluster" in results_df.columns:
+        cluster_metrics = []
+        for cluster_id in sorted(pd.unique(results_df["Cluster"])):
+            df_c = results_df[results_df["Cluster"] == cluster_id]
+            entry = {"Cluster": int(cluster_id)}
+            rmse_turn = np.sqrt(mean_squared_error(df_c["True_Values_Turnover"], df_c["Predictions_Turnover"]))
+            r2_turn = r2_score(df_c["True_Values_Turnover"], df_c["Predictions_Turnover"]) 
+            entry.update({"RMSE_Turnover": round(rmse_turn, 4), "R2_Turnover": round(r2_turn, 4)})
+            if target_mode != "turnover" and "True_Values_Loss" in df_c.columns:
+                rmse_loss = np.sqrt(mean_squared_error(df_c["True_Values_Loss"], df_c["Predictions_Loss"]))
+                r2_loss = r2_score(df_c["True_Values_Loss"], df_c["Predictions_Loss"]) 
+                rmse_incorp = np.sqrt(mean_squared_error(df_c["True_Values_Incorporation"], df_c["Predictions_Incorporation"]))
+                r2_incorp = r2_score(df_c["True_Values_Incorporation"], df_c["Predictions_Incorporation"]) 
+                entry.update({
+                    "RMSE_Loss": round(rmse_loss, 4),
+                    "R2_Loss": round(r2_loss, 4),
+                    "RMSE_Incorporation": round(rmse_incorp, 4),
+                    "R2_Incorporation": round(r2_incorp, 4),
+                })
+            cluster_metrics.append(entry)
+        pd.DataFrame(cluster_metrics).to_csv(os.path.join(results_save_dir, "cluster_scores.csv"), index=False)
 
     return results_df, scores
 
@@ -474,9 +688,23 @@ def recursive_test(model, test_df: pd.DataFrame, results_save_dir, debug=False):
 
         for unique_peptide in tqdm(unique_peptides, total=len(unique_peptides)):
             peptide_df = test_df[test_df["Cleaned_Peptidoform"] == unique_peptide]
+            peptide_df = peptide_df.sort_values("timestep")
             # lag features
-            lag_features_loss = [1] * 7
-            lag_features_incorporation = [0] * 7
+            # seed with dataset-provided lags for the first timestep if available
+            def extract_lags(row, prefix):
+                cols = [f"{prefix}_t-{i}" for i in range(1, 8)]
+                vals = []
+                for c in cols:
+                    if c in row:
+                        vals.append(row[c])
+                if len(vals) == 7:
+                    return vals
+                # fallback
+                return ([1] * 7) if prefix == "Label loss" else ([0] * 7)
+
+            first_row = peptide_df.iloc[0]
+            lag_features_loss = extract_lags(first_row, "Label loss")
+            lag_features_incorporation = extract_lags(first_row, "Label incorporation")
             if len(peptide_df) != 8:
                 continue
 
@@ -528,7 +756,7 @@ def recursive_test(model, test_df: pd.DataFrame, results_save_dir, debug=False):
                 # ラグ特徴量を更新
                 lag_features_loss = [output_loss.cpu().numpy()[0][0]] + lag_features_loss[:-1]
                 lag_features_incorporation = [output_incorporation.cpu().numpy()[0][0]] + lag_features_incorporation[:-1]
-    # 評価指標の計算
+    # 評価指標の計算（全体）
     rmse_loss = np.sqrt(mean_squared_error(all_targets_loss, all_preds_loss))
     rmse_incorporation = np.sqrt(mean_squared_error(all_targets_incorporation, all_preds_incorporation))
     rmse_turnover = np.sqrt(mean_squared_error(all_targets_turnover, all_preds_turnover))
@@ -661,6 +889,9 @@ def run_model(
     model_save_path=None,
     result_save_dir=None,
     plt_save_dir=None,
+    target_mode: str = "both",
+    direct_turnover: bool = False,
+    clusters_filter=None,
 ):
     if datasize != "all":
         datasize = int(datasize)
@@ -680,6 +911,12 @@ def run_model(
         train_df = pd.read_csv(train_path)
         val_df = pd.read_csv(val_path)
         test_df = pd.read_csv(test_path)
+
+    # Optional cluster filtering on all splits
+    if clusters_filter is not None and len(clusters_filter) > 0:
+        train_df = train_df[train_df["Cluster"].isin(clusters_filter)].reset_index(drop=True)
+        val_df = val_df[val_df["Cluster"].isin(clusters_filter)].reset_index(drop=True)
+        test_df = test_df[test_df["Cluster"].isin(clusters_filter)].reset_index(drop=True)
 
     # oversample clusters
 
@@ -701,6 +938,7 @@ def run_model(
             num_layers=num_layers,
             dropout=dropout,
             activation_func=activation_func,
+            predict_turnover=direct_turnover,
         ).to(device)
     elif "LSTM" in model_type or "GRU" in model_type:
         if torch.cuda.is_available():
@@ -712,6 +950,7 @@ def run_model(
             num_layers=num_layers,
             dropout=dropout,
             activation_func=activation_func,
+            predict_turnover=direct_turnover,
         )
         print("モデル初期化完了:")
         print(model)  # モデル構造を出力
@@ -759,14 +998,15 @@ def run_model(
         early_stop_threshold,
         scheduler,
         model_type,
+        target_mode,
     )
 
     # test model
     if "TimeSeq" in model_type:
-        results_df, scores = test_model_TimeSeq(model, test_loader, result_save_dir)
+        results_df, scores = test_model_TimeSeq(model, test_loader, result_save_dir, target_mode=target_mode)
         return scores
     elif "AASeq" in model_type:
-        results_df, no_recursive_scores = test_model_AASeq(model, test_loader, result_save_dir)
+        results_df, no_recursive_scores = test_model_AASeq(model, test_loader, result_save_dir, target_mode=target_mode)
         recursive_results_df, recursive_scores = recursive_test(model, test_df, result_save_dir)
         return no_recursive_scores, recursive_scores
 

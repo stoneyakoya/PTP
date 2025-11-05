@@ -58,6 +58,7 @@ class Datasets_TimeSeq(Dataset):
         # 8ステップ分を蓄えるリスト
         timesteps = []
         peptides = []
+        proteins = []
         features_x = []
         target_loss_list = []
         target_incorp_list = []
@@ -148,6 +149,7 @@ class Datasets_TimeSeq_AAC(Dataset):
 
         timesteps = []
         peptides = []
+        proteins = []
         features_x = []
         target_loss_list = []
         target_incorp_list = []
@@ -327,6 +329,122 @@ class Datasets_AASeq(Dataset):
         # 結合 (seq_len, embedding_dim + lag_dim)
         combined = torch.cat([peptido_embedding, repeated_lag], dim=1)
         return combined
+
+
+class Datasets_AASeq_AAC(Dataset):
+    """
+    AAC (Amino Acid Composition) 特徴量とラグ特徴量を組み合わせたデータセット。
+    Datasets_AASeq の埋め込み版に対して、AAC特徴量を使用する版。
+    """
+
+    def __init__(self, df, input_cls=False):
+        df = df.rename(columns=lambda c: c.replace(" ", "_").replace("-", "_"))
+
+        # ラグ列名を特定（時系列順に整列）
+        self.lag_col_names_loss = [c for c in df.columns if "Label_loss_t_" in c]
+        self.lag_col_names_incorp = [c for c in df.columns if "Label_incorporation_t_" in c]
+
+        def _lag_index(col_name: str) -> int:
+            # 末尾の整数インデックスを抽出（例: Label_loss_t_1 -> 1）
+            try:
+                return int(str(col_name).rsplit("_", 1)[-1])
+            except Exception:
+                return 0
+
+        self.lag_col_names_loss.sort(key=_lag_index)
+        self.lag_col_names_incorp.sort(key=_lag_index)
+
+        # ペプチド単位で groupby
+        grouped = df.groupby("Cleaned_Peptidoform")
+        self.peptide_groups = []
+        for peptide_id, group_df in grouped:
+            # 時系列順にソート (timestep列で昇順)
+            group_df = group_df.sort_values("timestep", ascending=True).reset_index(drop=True)
+            if len(group_df) == 8:
+                # ちょうど8行あるものだけ self.peptide_groups に追加
+                self.peptide_groups.append((peptide_id, group_df))
+
+    def __len__(self):
+        return len(self.peptide_groups)
+
+    def __getitem__(self, idx):
+        peptide_id, group_df = self.peptide_groups[idx]
+
+        # 8ステップ分を蓄えるリスト
+        timesteps = []
+        peptides = []
+        proteins = []
+        features_x = []
+        target_loss_list = []
+        target_incorp_list = []
+        target_turnover_list = []
+        cluster_list = []
+        loss_K = []
+        incorp_K = []
+
+        # group_df の各行 ( = 各タイムポイント ) を順番に処理
+        for row in group_df.itertuples(index=False):
+            # NamedTuple → dict に変換
+            row_dict = row._asdict()
+            
+            # AAC特徴量抽出（ペプチド単位）
+            pep_seq = row_dict["Cleaned_Peptidoform"]
+            protein_seq = row_dict["Protein_Sequence"]
+            aac_vector = get_local_aac(protein_seq, pep_seq, flank=0)
+
+            # ラグ特徴量（turnover と同様の比率特徴量）を作成
+            # ratio_k = lag_incorp_k / (lag_loss_k + lag_incorp_k)
+            lag_ratio_vec = []
+            for loss_col, inc_col in zip(self.lag_col_names_loss, self.lag_col_names_incorp):
+                loss_val = float(row_dict.get(loss_col, 0.0))
+                inc_val = float(row_dict.get(inc_col, 0.0))
+                denom = loss_val + inc_val
+                ratio = (inc_val / denom) if denom > 0 else 0.0
+                lag_ratio_vec.append(ratio)
+
+            # AAC(20) + lag_ratio(num_lags) を結合
+            combined_vec = np.concatenate(
+                [
+                    np.asarray(aac_vector, dtype=np.float32),
+                    np.asarray(lag_ratio_vec, dtype=np.float32),
+                ],
+                axis=0,
+            )
+
+            features_x.append(combined_vec)
+
+            # ターゲットとメタ情報
+            target_loss_list.append(row_dict["Target_LabelLoss"])
+            target_incorp_list.append(row_dict["Target_LabelIncorporation"])
+            target_turnover_list.append(row_dict["Target_TurnoverRate"])
+            peptides.append(row_dict["Cleaned_Peptidoform"])
+            proteins.append(row_dict["Protein_Sequence"])
+            timesteps.append(row_dict["timestep"])
+            loss_K.append(row_dict["loss_K"])
+            incorp_K.append(row_dict["incorporation_K"])
+
+        # (8, 20 + num_lags) に stack
+        arr_features = np.stack(features_x, axis=0)
+
+        # ターゲットも (8,)
+        arr_t_loss = np.array(target_loss_list, dtype=np.float32)
+        arr_t_incorp = np.array(target_incorp_list, dtype=np.float32)
+        arr_t_turnover = np.array(target_turnover_list, dtype=np.float32)
+        cluster = group_df.iloc[0]["Cluster"]
+
+        return {
+            "peptide": peptides,
+            "proteins": proteins,
+            "timestep": timesteps,
+            # "features_x": torch.tensor(arr_features, dtype=torch.float32),  # shape: (8, 20 + num_lags)
+            "features_loss": torch.tensor(arr_features, dtype=torch.float32),
+            "target_loss": torch.tensor(arr_t_loss, dtype=torch.float32),
+            "target_incorporation": torch.tensor(arr_t_incorp, dtype=torch.float32),
+            "target_turnover": torch.tensor(arr_t_turnover, dtype=torch.float32),
+            "cluster": torch.tensor(cluster, dtype=torch.float32),
+            "loss_K": torch.tensor(loss_K[0], dtype=torch.float32),
+            "incorp_K": torch.tensor(incorp_K[0], dtype=torch.float32),
+        }
 
 
 # 埋め込みベクトルをパディングする関数

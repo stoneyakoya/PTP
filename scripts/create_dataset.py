@@ -3,17 +3,61 @@ import random
 
 import numpy as np
 import pandas as pd
-from clustering_data import timeseries_clustering
+from clustering_data import timeseries_clustering, plot_clusters_from_df, relabel_clusters_in_df
 from preprocess_data import PrepareInput, PrepareTarget
+from preprocess_data import PrepareTarget as _PT
 from sklearn.model_selection import KFold
 
 
-def preprocess_main():
+def _emit_dataset_characteristics(df: pd.DataFrame, save_dir: str = "reports/tables"):
+    os.makedirs(save_dir, exist_ok=True)
+    # Unique counts by protein/peptide, cluster distribution
+    summary = {
+        "proteins_unique": int(df["Protein names"].nunique()) if "Protein names" in df.columns else 0,
+        "peptides_unique": int(df["Cleaned_Peptidoform"].nunique()) if "Cleaned_Peptidoform" in df.columns else 0,
+    }
+    if "Cluster" in df.columns:
+        cluster_counts = df.groupby("Cluster")["Cleaned_Peptidoform"].nunique().to_dict()
+        for k, v in cluster_counts.items():
+            summary[f"Cluster {k} peptides"] = int(v)
+    pd.DataFrame([summary]).to_csv(os.path.join(save_dir, "dataset_characteristics.csv"), index=False)
+
+
+def _filter_single_peptide_per_protein(
+    df: pd.DataFrame, only_single: bool = False, protein_key: str = "UniProt IDs"
+) -> pd.DataFrame:
+    """
+    Optionally keep only proteins that have exactly ONE unique peptide.
+    protein_key: "UniProt IDs" or "Protein names". For UniProt, the first ID is used.
+    """
+    if not only_single:
+        return df
+    df_tmp = df.copy()
+    if protein_key == "UniProt IDs":
+        df_tmp["_protein_id"] = df_tmp[protein_key].astype(str).str.split(";").str[0]
+    else:
+        df_tmp["_protein_id"] = df_tmp[protein_key].astype(str)
+    counts = df_tmp.groupby("_protein_id")["Cleaned_Peptidoform"].nunique()
+    keep_ids = set(counts[counts == 1].index)
+    before = len(df_tmp)
+    df_tmp = df_tmp[df_tmp["_protein_id"].isin(keep_ids)].drop(columns=["_protein_id"]).reset_index(drop=True)
+    after = len(df_tmp)
+    print(f"Filtered to proteins with a single peptide: removed {before - after} rows, kept {after} rows.")
+    return df_tmp
+
+
+def preprocess_main(
+    skip_seq_embed: bool = True,
+    only_single_peptide_per_protein: bool = False,
+    esm_model: str = "esm2_t33_650M_UR50D",
+    cluster_feature_mode: str = "both",  # "both" | "incorp"
+    cluster_relabel_metric: str = "avg_turnover",  # e.g., "avg_incorp"
+):
     """Main preprocessing function."""
     # Prepare input & target data
     raw_data_path = "data/raw/pSILAC_TMT.csv"
     target_df = PrepareTarget(raw_data_path).run()
-    input_target_df = PrepareInput(target_df).run()
+    input_target_df = PrepareInput(target_df).run(skip_seq_embed=skip_seq_embed, esm_model=esm_model)
 
     # Add cluster information
     n_clusters = 5
@@ -24,21 +68,23 @@ def preprocess_main():
             df=input_target_df,
             n_clusters=n_clusters,
             save_path=save_path,
+            feature_mode=cluster_feature_mode,
+            relabel_metric=cluster_relabel_metric,
         )
     else:
         print(f"Loading existing file: {save_path}")
         input_target_df_add_cluster_info = pd.read_csv(save_path)
 
     # Remove rows with NaN in Peptido_Embedding_Path
+    # 正しく自身のフレームで判定（元のバグ修正）
     input_target_df_add_cluster_info = input_target_df_add_cluster_info[
-        input_target_df["Peptido_Embedding_Path"].apply(
+        input_target_df_add_cluster_info["Peptido_Embedding_Path"].apply(
             lambda x: isinstance(x, str) and os.path.exists(x)
         )
     ].reset_index(drop=True)
 
     print(input_target_df_add_cluster_info)
     print(input_target_df_add_cluster_info.columns)
-    input()
 
     # Data info: check the number of unique peptides in each cluster
     for cluster_id, group in input_target_df_add_cluster_info.groupby("Cluster"):
@@ -61,7 +107,43 @@ def preprocess_main():
         f"Number of unique peptides in the entire DataFrame: {len(input_target_df_add_cluster_info['Cleaned_Peptidoform'].unique())}"
     )
 
+    # Emit dataset characteristics after clustering (pre-split)
+    # 速度指標でクラスタ番号のリラベル（avg_turnover）
+    input_target_df_add_cluster_info, mapping = relabel_clusters_in_df(
+        input_target_df_add_cluster_info,
+        relabel_metric=cluster_relabel_metric,
+        ascending=False,
+    )
+    # 保存（番号の安定化）
+    input_target_df_add_cluster_info.to_csv(save_path, index=False)
+
+    # Optionally restrict to proteins with exactly one peptide (by UniProt ID)
+    input_target_df_add_cluster_info = _filter_single_peptide_per_protein(
+        input_target_df_add_cluster_info, only_single=only_single_peptide_per_protein, protein_key="UniProt IDs"
+    )
+
+    _emit_dataset_characteristics(input_target_df_add_cluster_info)
+
+    # リラベル後の番号でクラスタ図を作成（番号順で cluster_0..K-1）
+    try:
+        plot_clusters_from_df(
+            input_target_df_add_cluster_info,
+            n_clusters=None,
+            save_dir="reports/figures/dataset/clustering",
+        )
+    except Exception as e:
+        print(f"Plot regeneration failed: {e}")
     enhanced_k_fold_split_dataset(input_target_df_add_cluster_info, dataset_dir)
+
+    # 可視化（clip_arch の時系列図をここで統一して出力）
+    try:
+        _PT("").plot_publication_boxplots(
+            df=input_target_df_add_cluster_info.groupby("Cleaned_Peptidoform").first().reset_index(),
+            normalize_method="clip_arch",
+            save_path="reports/figures/dataset/timeseries_boxplots_clip_arch.png",
+        )
+    except Exception as e:
+        print(f"Plot generation failed: {e}")
 
     # Sampling dataset
     dataset_dir = "data/dataset/sampling"
@@ -77,6 +159,7 @@ def preprocess_main():
     print(
         f"Number of unique peptides in the entire DataFrame: {len(sampled_df['Cleaned_Peptidoform'].unique())}"
     )
+    _emit_dataset_characteristics(sampled_df)
     enhanced_k_fold_split_dataset(sampled_df, dataset_dir)
 
     # Customized dataset: reduce target clusters
@@ -91,6 +174,7 @@ def preprocess_main():
         clusters_to_reduce=clusters_to_reduce,
     )
 
+    _emit_dataset_characteristics(customized_df)
     normal_split_dataset(customized_df, dataset_dir)
 
 
@@ -292,6 +376,18 @@ def enhanced_k_fold_split_dataset(
         train_df.to_csv(train_path, index=False)
         validation_df.to_csv(val_path, index=False)
         test_df.to_csv(test_path, index=False)
+        # クラスタ分布（ユニークペプチド単位）
+        def cluster_nunique_peptides(frame: pd.DataFrame):
+            if "Cluster" not in frame.columns:
+                return {}
+            return (
+                frame.groupby("Cluster")["Cleaned_Peptidoform"].nunique().to_dict()
+            )
+
+        train_cluster_stats = cluster_nunique_peptides(train_df)
+        val_cluster_stats = cluster_nunique_peptides(validation_df)
+        test_cluster_stats = cluster_nunique_peptides(test_df)
+
         stats = {
             "Fold": fold_num,
             "Train Proteins": len(train_proteins),
@@ -304,11 +400,21 @@ def enhanced_k_fold_split_dataset(
             "Validation Rows": len(validation_df),
             "Test Rows": len(test_df),
         }
+        # 各クラスタのユニークペプチド数を列として展開（例: Train Cluster 0 Peptides）
+        for cluster_id, count in train_cluster_stats.items():
+            stats[f"Train Cluster {cluster_id} Peptides"] = count
+        for cluster_id, count in val_cluster_stats.items():
+            stats[f"Validation Cluster {cluster_id} Peptides"] = count
+        for cluster_id, count in test_cluster_stats.items():
+            stats[f"Test Cluster {cluster_id} Peptides"] = count
         summary.append(stats)
 
         pd.DataFrame([stats]).to_csv(stats_path, index=False)
 
-    summary_df = pd.DataFrame(summary)
+    # 列の順序は pandas に任せるが、NaN は 0 扱いで保存
+    summary_df = pd.DataFrame(summary).fillna(0).astype({
+        k: int for k in [c for c in pd.DataFrame(summary).columns if c != "Fold"]
+    }) if len(summary) else pd.DataFrame()
     summary_df.to_csv(os.path.join(save_dir, "kfold_summary.csv"), index=False)
     return summary_df
 
@@ -381,4 +487,34 @@ def create_K_dataset():
 
 
 if __name__ == "__main__":
-    preprocess_main()
+    import argparse
+    parser = argparse.ArgumentParser(description="Create datasets with clustering and splits")
+    parser.add_argument("--skip_seq_embed", action="store_true", help="Skip sequence/embedding steps")
+    parser.add_argument("--esm_model", type=str, default="esm2_t33_650M_UR50D", help="ESM model name (e.g., esm2_t33_650M_UR50D, esm2_t30_150M_UR50D, esm3_t12_35M")
+    parser.add_argument(
+        "--only_single_peptide_per_protein",
+        action="store_true",
+        help="Keep only proteins that have exactly one unique peptide",
+    )
+    parser.add_argument(
+        "--cluster_feature_mode",
+        type=str,
+        default="both",
+        choices=["both", "incorp"],
+        help="Features used for time-series clustering: both loss+incorp or incorp only",
+    )
+    parser.add_argument(
+        "--cluster_relabel_metric",
+        type=str,
+        default="avg_turnover",
+        choices=["avg_turnover", "avg_incorp", "initial_slope", "delta", "k_loss", "k_incorp", "k_mean"],
+        help="Metric to relabel clusters by kinetic speed",
+    )
+    args = parser.parse_args()
+    preprocess_main(
+        skip_seq_embed=args.skip_seq_embed,
+        only_single_peptide_per_protein=args.only_single_peptide_per_protein,
+        esm_model=args.esm_model,
+        cluster_feature_mode=args.cluster_feature_mode,
+        cluster_relabel_metric=args.cluster_relabel_metric,
+    )

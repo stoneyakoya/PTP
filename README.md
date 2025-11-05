@@ -1,5 +1,7 @@
 # PTP
 
+[English] | [日本語](README-ja.md)
+
 ## Overview
 
 PTP is a pipeline for processing pSILAC-TMT data and training predictive models. This project includes:

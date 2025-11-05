@@ -12,6 +12,7 @@ class LSTM(nn.Module):
         dropout=0.5,
         activation_func="Sigmoid",
         bidirectional=False,
+        predict_turnover: bool = False,
     ):
         super().__init__()
 
@@ -33,6 +34,9 @@ class LSTM(nn.Module):
 
         self.fc_loss = nn.Linear(lstm_output_dim, 1)
         self.fc_incorporation = nn.Linear(lstm_output_dim, 1)
+        self.predict_turnover = predict_turnover
+        if self.predict_turnover:
+            self.fc_turnover = nn.Linear(lstm_output_dim, 1)
 
         # ドロップアウト
         self.dropout = nn.Dropout(dropout)
@@ -65,5 +69,10 @@ class LSTM(nn.Module):
         # Incorporationタスクの出力
         out_incorporation = self.fc_incorporation(out_shared)  # (batch, seq_len, 1)
         output_incorporation = self.activation(out_incorporation)  # (batch, seq_len, 1)
+
+        if self.predict_turnover:
+            out_turnover = self.fc_turnover(out_shared)
+            output_turnover = self.activation(out_turnover)
+            return output_loss, output_incorporation, output_turnover
 
         return output_loss, output_incorporation

@@ -13,6 +13,7 @@ class Transformer_TimeSeq(nn.Module):
         num_layers=2,
         dropout=0.1,
         activation_func="Sigmoid",
+        predict_turnover: bool = False,
     ):
         super().__init__()
 
@@ -44,6 +45,9 @@ class Transformer_TimeSeq(nn.Module):
         # 出力層（LSTMと同様のシンプルな構造）
         self.fc_loss = nn.Linear(embed_dim, 1)
         self.fc_incorporation = nn.Linear(embed_dim, 1)
+        self.predict_turnover = predict_turnover
+        if self.predict_turnover:
+            self.fc_turnover = nn.Linear(embed_dim, 1)
 
         # Dropout
         self.dropout = nn.Dropout(dropout)
@@ -92,6 +96,9 @@ class Transformer_TimeSeq(nn.Module):
         # 出力層
         loss_out = self.fc_loss(x)
         incorporation_out = self.fc_incorporation(x)
+        if self.predict_turnover:
+            turnover_out = self.fc_turnover(x)
+            return self.activation(loss_out), self.activation(incorporation_out), self.activation(turnover_out)
 
         return self.activation(loss_out), self.activation(incorporation_out)
 
@@ -136,6 +143,7 @@ class Transformer_AASeq(nn.Module):
         num_layers,
         dropout=0.5,
         activation_func="Sigmoid",
+        predict_turnover: bool = False,
     ):
         super().__init__()
 
@@ -160,6 +168,9 @@ class Transformer_AASeq(nn.Module):
         # 最終的な予測用の全結合層 (lossとincorporation)
         self.fc_loss = nn.Linear(embed_dim, 1)  # Label loss用
         self.fc_incorporation = nn.Linear(embed_dim, 1)  # Label incorporation用
+        self.predict_turnover = predict_turnover
+        if self.predict_turnover:
+            self.fc_turnover = nn.Linear(embed_dim, 1)
 
         self.dropout = nn.Dropout(dropout)
 
@@ -209,6 +220,17 @@ class Transformer_AASeq(nn.Module):
         # タスク出力
         output_loss = self.activation(self.fc_loss(loss_pooled))
         output_incorporation = self.activation(self.fc_incorporation(incorp_pooled))
+        if self.predict_turnover:
+            output_turnover = self.activation(self.fc_turnover((loss_pooled + incorp_pooled) / 2))
+            return (
+                output_loss,
+                output_incorporation,
+                output_turnover,
+                loss_pooled,
+                incorp_pooled,
+                loss_attn_scores_all,  # 各レイヤーのアテンションスコアを返す
+                incorp_attn_scores_all,
+            )
 
         return (
             output_loss,
